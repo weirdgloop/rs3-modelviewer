@@ -31,6 +31,10 @@ import { fileHistory } from '../scripts/filehistory';
 import { MaterialData } from '../3d/jmat';
 import { extractCacheFiles } from '../scripts/extractfiles';
 import { debugProcTexture } from '../3d/proceduraltexture';
+import {mkdir} from 'node:fs/promises';
+import {Buffer} from 'node:buffer';
+import * as path from "path";
+import sharp from "sharp";
 
 type LookupMode = "model" | "item" | "npc" | "object" | "material" | "map" | "avatar" | "spotanim" | "scenario" | "scripts";
 
@@ -1257,7 +1261,7 @@ function useAsyncModelData<ID, T>(ctx: UIContextReady | null, getter: (cache: Th
 			}
 		}
 	}, [visible, ctx]);
-	return [visible, loadedModel, loadedId, setter] as [state: SimpleModelInfo<T> | null, model: RSModel | null, id: ID | null, setter: (id: ID) => void];
+	return [visible, loadedModel, loadedId, setter, setter] as [state: SimpleModelInfo<T> | null, model: RSModel | null, id: ID | null, setter: (id: ID) => void, setterAsync:(id:ID)=>Promise<void>];
 }
 
 type MaterialIshId = { mode: "material" | "underlay" | "overlay" | "texture", id: number };
@@ -1468,9 +1472,9 @@ function ItemCameraMode({ ctx, meta, centery }: { ctx: UIContextReady, meta?: it
 
 	cam.position.copy(pos);
 	cam.quaternion.copy(rot);
+	cam.aspect = ctx.renderer.getCanvas().width / ctx.renderer.getCanvas().height;
 	cam.updateProjectionMatrix();
 	cam.updateMatrixWorld(true);
-
 	React.useEffect(() => {
 		let el: ThreeJsSceneElementSource = {
 			getSceneElements() {
@@ -1501,8 +1505,129 @@ function ItemCameraMode({ ctx, meta, centery }: { ctx: UIContextReady, meta?: it
 	)
 }
 
+type GazBulkParams = {
+	data: SimpleModelInfo<any,any>|null,
+	setId: (id:number)=>Promise<void>,
+	p: LookupModeProps,
+	id: number|{id:number, head:boolean}|null,
+	rendertype: string
+}
+function DoGazBulk(params:GazBulkParams){
+	let p = params.p!;
+	let [startid, setStart] = React.useState<number>(0);
+	let loadedId = React.useRef<number>(0);
+	let [endid, setEnd] = React.useState<number>(10);
+	let tries = 0;
+
+	React.useEffect(()=>{
+		if (params.id == null) return;
+		if (params.rendertype == 'npc') {
+			loadedId.current = (params.id! as {id:number,head:boolean}).id;
+		} else {
+			loadedId.current = (params.id! as number);
+		}
+			
+	}, [params.id]);
+
+	const render = async (id:number) => {
+		if (p.ctx === null) {
+			console.log('ctx is none')
+			return;
+		}
+		let blb = await new Promise<Blob|null>(resolve=>p.ctx!.renderer.getCanvas().toBlob(resolve,'image/png'));
+		//let newpixels = await p.ctx.renderer.takeCanvasPicture();//instSize.w || undefined, instSize.h || undefined);
+		await timeout(100);
+		//window.console.log(newpixels);
+		//(window as any).newpixels = newpixels;
+		//let newimg = makeImageData(newpixels.data, newpixels.width, newpixels.height);
+		//(window as any).newimg = newimg;
+		/*let cnv = document.createElement("canvas");
+		await timeout(100);
+		(window as any).cnv = cnv;
+		window.console.log(cnv);
+		let ctx = cnv.getContext("2d")!;
+		await timeout(100);
+		(window as any).ctx = ctx;
+		window.console.log(ctx);
+		if (instCrop) {
+			let bounds = findImageBounds(newpixels);
+			await timeout(100);
+			(window as any).bounds = bounds;
+			window.console.log(bounds);
+			cnv.width = bounds.width;
+			cnv.height = bounds.height;
+			ctx.putImageData(newpixels, -bounds.x, -bounds.y);
+		} else {
+			cnv.width = newpixels.width;
+			cnv.height = newpixels.height;
+			ctx.putImageData(newpixels, 0, 0)
+		}
+		await timeout(100);
+
+		let blb:Blob|null = await (new Promise<Blob|null>(resolve=>cnv.toBlob(resolve, 'image/png')));
+		await timeout(100);*/
+		(window as any).blb = blb;
+		window.console.log(blb);
+		if (!blb) return;
+		let ab = await blb.arrayBuffer();
+		let sh = sharp(Buffer.from(ab)).png().trim(1);
+		let folder = path.resolve('renders', params.rendertype);
+		await mkdir(folder, {recursive:true});
+		await timeout(100);
+		window.console.log(sh);
+		(window as any).sh = sh;
+		try {
+			await sh.toFile(path.resolve(folder, `${id}.png`));
+		} catch(e){
+		}
+		
+	}
+	const reframe = async()=>{
+		await timeout(100);
+		p.ctx!.renderer.resetCamera();
+		await timeout(100);
+		p.ctx!.renderer.reframeAreaBox(1.1);
+	}
+
+	const timeout = async (x:number)=>{
+		return new Promise<void>(resolve=>setTimeout(resolve,x));
+	}
+	const go = async() => {
+		let start = startid;
+		let end = endid;
+		let curr = start;
+		while (curr <= end) {
+			tries = 0;
+			window.console.log('doing '+curr)
+			await params.setId(curr);
+			while (loadedId.current != curr) {
+				window.console.log('waiting', params.id)
+				await timeout(100);
+			}
+			if (params.rendertype == 'npc') {
+				await reframe();
+			}
+			await timeout(100);
+			window.console.log('saving '+curr)
+			await render(curr)
+			curr++;
+			await timeout(100);
+		}
+	}
+	
+	return (<React.Fragment>
+		<LabeledInput label="start ID">
+			<input type="number" onChange={(e)=>setStart(parseInt(e.currentTarget.value))} />
+		</LabeledInput>
+		<LabeledInput label="end ID">
+			<input type="number" onChange={(e)=>setEnd(parseInt(e.currentTarget.value))} />
+		</LabeledInput>
+		<input type="button" className="sub-btn" value="gaz bulk" onClick={go}/>
+	</React.Fragment>)
+}
+
 function SceneItem(p: LookupModeProps) {
-	let [data, model, id, setId] = useAsyncModelData(p.ctx, itemToModel);
+	let [data, model, id, setId, setIdAsync] = useAsyncModelData(p.ctx, itemToModel);
 	let initid = id ?? (typeof p.initialId == "number" ? p.initialId : 0);
 	let [enablecam, setenablecam] = React.useState(false);
 	// let [histfs, sethistfs] = React.useState<UIScriptFS | null>(null);
@@ -1528,6 +1653,7 @@ function SceneItem(p: LookupModeProps) {
 				{enablecam && p.ctx && <ItemCameraMode ctx={p.ctx} meta={data?.info} centery={centery} />}
 				<JsonDisplay obj={data?.info} />
 			</div>
+			<DoGazBulk data={data} id={id} setId={setIdAsync} p={p} rendertype="item" />
 			{/* <input type="button" className="sub-btn" value="history" onClick={gethistory} />
 			{histfs && p.ctx && <UIScriptFiles fs={histfs} ctx={p.ctx} />} */}
 		</React.Fragment>
@@ -1535,9 +1661,10 @@ function SceneItem(p: LookupModeProps) {
 }
 
 function SceneNpc(p: LookupModeProps) {
-	const [data, model, id, setId] = useAsyncModelData(p.ctx, npcToModel);
+	const [data, model, id, setId, setIdAsync] = useAsyncModelData(p.ctx, npcToModel);
 	const forceUpdate = useForceUpdate();
 	const initid = id ?? checkObject(p.initialId, { id: "number", head: "boolean" }) ?? { id: 0, head: false };
+	const setIdAsyncBody = async(id:number)=>{await setIdAsync({'id':id,'head':false})};
 
 	return (
 		<React.Fragment>
@@ -1556,6 +1683,7 @@ function SceneNpc(p: LookupModeProps) {
 			<div className="mv-sidebar-scroll">
 				<JsonDisplay obj={data?.info} />
 			</div>
+			<DoGazBulk data={data} id={id} setId={setIdAsyncBody} p={p} rendertype="npc" />
 		</React.Fragment>
 	)
 }
